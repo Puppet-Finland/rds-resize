@@ -1,0 +1,23 @@
+master_rds_identifier: master-rds
+new_rds_identifier: db-test1
+databases:
+  keycloak:
+    password: foo
+  appdata:
+    user: dbuser
+    password: foobarbaz
+
+allocated_storage: 90
+max_allocated_storage: 100
+
+# If new_rds_identifier already exists, this will reuse it
+reuse_new_rds: true
+
+# psql info
+psql_admin: psqladmin
+psql_password: supersecure123
+
+# AWS related info
+aws_access_key_id: 12345
+aws_secret_access_key: abcdef123lmnop
+aws_region: us-south-3

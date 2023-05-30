@@ -1,0 +1,5 @@
+src/*.log
+src/dumps
+src/config.yaml
+src/dump/*
+*.swp
