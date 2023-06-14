@@ -2,7 +2,6 @@
 # pyright: reportMissingImports=false, reportGeneralTypeIssues=false, reportMissingModuleSource=false
 
 # NOTE: connection string: psql -h $PGIP db_name db_user
-# TODO: convert to class object / major refactor
 
 from subprocess import Popen, PIPE
 import yaml
@@ -13,376 +12,396 @@ import logging
 import argparse
 import os
 
-# Globals to be manipulated by functions
-master_rds_address=''
-psql_admin=''
-config={}
-aws_access_key_id=''
-aws_secret_access_key=''
-aws_default_region=''
-psql_password=''
 
-def get_args() -> dict:
-    parser = argparse.ArgumentParser( prog='rds-resize',
-                    description='Creates RDS instance and dumps/restores databases.',
-                    epilog='Script will loop through databases \
-                            and dump/copy data to newly created rds instance.')
-    parser.add_argument('-t', '--test', action='store_true')
-
-    return parser.parse_args()
+class ResizeRDS:
+    @staticmethod
+    def get_config(cf: str = 'config.yaml') -> hash:
+        with open(cf, 'r') as f:
+            data = yaml.load(f, Loader=yaml.FullLoader)
+        return data
 
 
-def test_rds():
-    config = get_config()
-    db_items = config['databases']
-    psql_admin = config['psql_admin']
-    db_names = list(db_items.keys())
-    master_rds_address = get_rds_address(config['master_rds_identifier'])
-    new_rds_address = get_rds_address(config['new_rds_identifier'])
-    print(f"MASTER: {master_rds_address}")
-    print(f"NEWRDS: {new_rds_address}")
-    conn = psycopg2.connect(
-        host=master_rds_address,
-        database='postgres',
-        user=psql_admin,
-        password=psql_password
-    )
-    nconn = psycopg2.connect(
-        host=new_rds_address,
-        database='postgres',
-        user=psql_admin,
-        password=psql_password
-    )
-
-    conn.set_session(readonly=True)
-    nconn.set_session(readonly=True)
-
-    cur = conn.cursor()
-    ncur = nconn.cursor()
-
-    print(f"{'='*5} (active connections old/new) {'='*5}")
-    for db_name in db_names:
-        count = get_con_count(cur, db_name)
-        ncount = get_con_count(ncur, db_name)
-        print(f"{db_name}: \t{count}/{ncount}")
-    print(f"{'='*40}")
-
-    cur.close()
-    ncur.close()
-    conn.close()
-    nconn.close()
-
-    print(f"{'='*8} (table count old/new) {'='*9}")
-    for db_name in db_names:
-        count = get_table_count(master_rds_address, db_name)
-        ncount = get_table_count(new_rds_address, db_name)
-        print(f"{db_name}: \t{count}/{ncount}")
-    print(f"{'='*40}")
+    @staticmethod
+    def _get_rds_address(stats) -> str:
+        return stats['Endpoint']['Addresss']
 
 
-def get_table_count(host: str, db_name: str) -> int:
-    conn = psycopg2.connect(
-        host=host,
-        database=db_name,
-        user=psql_admin,
-        password=psql_password
-    )
-    cur = conn.cursor()
-    cur.execute(f"""
-            SELECT COUNT(*) FROM information_schema.tables
-            WHERE table_type = 'BASE TABLE' AND table_schema = 'public';
-        """)
-    result = cur.fetchone()
+    def __init__(self, cf: str = "config.yaml"):
+        self.args = self._get_args()
+        self._setup_logging()
+        c = self.get_config(cf)
 
-    cur.close()
-    conn.close()
+        # Set EnvironmentVars for common command ussage
+        os.environ["AWS_ACCESS_KEY_ID"]     = str(c['aws_access_key_id'])
+        os.environ["AWS_SECRET_ACCESS_KEY"] = str(c['aws_secret_access_key'])
+        os.environ["AWS_DEFAULT_REGION"]    = str(c['aws_region'])
+        os.environ["PGPASSWORD"]            = str(c['psql_password'])
 
-    if result is not None:
-        return result[0]
-    return None
+        self.master_rds_address = ''
+        self.new_rds_address    = ''
 
-
-def get_config(yml_config: str = 'config.yaml') -> hash:
-    with open(yml_config, 'r') as f:
-        data = yaml.load(f, Loader=yaml.FullLoader)
-    return data
+        self.master_rds_address    = c['master_rds_identifier']
+        self.databases             = c['databases']
+        self.psql_admin            = c['psql_admin']
+        self.master_rds_identifier = c['master_rds_identifier']
+        self.new_rds_identifier    = c['new_rds_identifier']
+        self.allocated_storage     = c['allocated_storage']
+        self.max_allocated_storage = c['max_allocated_storage']
+        self.master_db_identifier  = c['master_rds_identifier']
+        self.reuse_new_rds         = c['reuse_new_rds']
 
 
-def run_process(cmd: list[str], use_shell: bool = False):
-    logging.debug(f'launching process with cmd: {cmd}')
-    if use_shell:
-        cmd = ' '.join(cmd)
-    p = Popen(cmd, stdout=PIPE, stderr=PIPE, shell=use_shell)
-    stdout, stderr = p.communicate()
-    if stdout:
-        logging.info(stdout)
-    if stderr:
-        logging.error(stderr)
-    exit_code = p.wait()
-    if exit_code:
-        logging.warning(f'process command {cmd} exited with {exit_code}')
-    logging.debug('process closed')
+        self.rds = boto3.client('rds')
 
 
-def get_con_count(cur, db_name: str) -> int | None:
-    cur.execute(f"""
-            SELECT count(*) FROM pg_stat_activity
-            WHERE datname = '{db_name}';
-        """)
-    result = cur.fetchone()
-    if result is not None:
-        return result[0]
-    return None
+    def __del__(self):
+        if hasattr(self, 'rds') and self.rds:
+            logging.debug('closing rds client in __del__()')
+            self.rds.close()
 
 
-def check_dbs_in_use(db_names: list[str]) -> bool:
-    # Connect to the database
-    db_in_use = False
-    conn = psycopg2.connect(
-        host=master_rds_address,
-        database='postgres',
-        user=psql_admin,
-        password=psql_password
-    )
+    def _get_args(self) -> argparse.Namespace:
+        parser = argparse.ArgumentParser( prog='rds-resize',
+                        description='Creates RDS instance and dumps/restores databases.',
+                        epilog='Script will loop through databases \
+                                and dump/copy data to newly created rds instance.')
+        parser.add_argument('-t', '--test', action='store_true')
+        parser.add_argument('-v', '--verbose', action='store_true')
+        parser.add_argument('-l', '--loglevel', choices=['debug', 'info', 'warning', 'error'],
+                            default='info', help='Set the log level')
 
-    cur = conn.cursor()
+        return parser.parse_args()
 
-    for db_name in db_names:
-        count = get_con_count(cur, db_name)
-        if count is not None:
-            if count > 0:
+
+    def _setup_logging(self):
+        logger      = logging.getLogger('')
+        log_level   = getattr(logging, self.args.loglevel.upper())
+        log_format  = '%(levelname)s: %(asctime)s %(message)s'
+        date_format = '%m/%d/%Y %H:%M:%S'
+        formatter   = logging.Formatter(log_format, datefmt=date_format)
+
+        file_handler = logging.FileHandler('resize.log')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+
+        if self.args.verbose:
+            stream_handler = logging.StreamHandler()
+            stream_handler.setFormatter(formatter)
+            logger.addHandler(stream_handler)
+
+        logger.setLevel(log_level)
+
+
+    def _get_rds_address(self, name: str) -> str:
+        result = self.rds.describe_db_instances(DBInstanceIdentifier=name)
+        rds_stats = result['DBInstances'][0]
+        address = rds_stats['Endpoint']['Address']
+        return address
+
+
+    def _get_con_count(self, cur, db_name: str) -> int | None:
+        cur.execute(f"""
+                SELECT count(*) FROM pg_stat_activity
+                WHERE datname = '{db_name}';
+            """)
+        result = cur.fetchone()
+        if result is not None:
+            return result[0]
+        return None
+
+
+    def _get_table_count(self, host: str, db_name: str) -> int:
+        conn = psycopg2.connect(
+            host=host,
+            database=db_name,
+            user=self.psql_admin,
+            password=self.psql_password
+        )
+        cur = conn.cursor()
+        cur.execute(f"""
+                SELECT COUNT(*) FROM information_schema.tables
+                WHERE table_type = 'BASE TABLE' AND table_schema = 'public';
+            """)
+        result = cur.fetchone()
+
+        cur.close()
+        conn.close()
+
+        if result is not None:
+            return result[0]
+        return None
+
+    def _run_process(self, cmd: list[str], use_shell: bool = False):
+        logging.debug(f'launching process with cmd: {cmd}')
+        if use_shell:
+            cmd = ' '.join(cmd)
+        p = Popen(cmd, stdout=PIPE, stderr=PIPE, shell=use_shell)
+        stdout, stderr = p.communicate()
+        if stdout:
+            logging.info(stdout)
+        if stderr:
+            logging.error(stderr)
+        exit_code = p.wait()
+        if exit_code:
+            logging.warning(f'process command {cmd} exited with {exit_code}')
+        logging.debug('process closed')
+
+
+    def _check_dbs_in_use(self, db_names: list[str]) -> bool:
+        # Connect to the database
+        db_in_use = False
+        conn = psycopg2.connect(
+            host=self.master_rds_address,
+            database='postgres',
+            user=self.psql_admin,
+            password=self.psql_password
+        )
+
+        cur = conn.cursor()
+
+        for db_name in db_names:
+            count = self._get_con_count(cur, db_name)
+            if count is not None:
+                if count > 0:
+                    db_in_use = True
+                    logging.critical(f"ERROR: {db_name} in use!")
+            else:
+                logging.critical(f"Error - check_db_use: no result on cur.fetchone()")
                 db_in_use = True
-                logging.critical(f"ERROR: {db_name} in use!")
+
+        # Close the cursor and connection
+        cur.close()
+        conn.close()
+
+        return db_in_use
+
+
+    def _dump_db(self, db_name: str, dump_file: str = ''):
+        if not dump_file:
+            dump_file = f'./dump/{db_name}.dump'
+
+        if os.path.exists(dump_file):
+            logging.warning(f'Dump file {dump_file} already exists! Using...')
+            return
+        logging.info(f"Dumping db {db_name} to {dump_file}...")
+        cmd = [
+            'pg_dump', '-U', self.psql_admin, '-h', self.master_rds_address,
+            '-F', 'c', '-f', self.dump_file, self.db_name
+        ]
+        self._run_process(cmd)
+        logging.debug(f"Finished dumping {db_name} to {dump_file}.")
+
+
+    def _restore_db(self, db_name: str, restore_file: str = ''):
+        if not restore_file:
+            restore_file = f'./dump/{db_name}.dump'
+        logging.info(f'Restoring {db_name} db with {restore_file}...')
+        if not os.path.exists(restore_file):
+            logging.error(f'file {restore_file} does not exist!')
+            return
+        cmd_restore_db = [
+            'pg_restore', '-U', self.psql_admin, '-h', self.new_rds_address,
+            '-F', 'c', '--create', '-d', 'postgres', restore_file
+        ]
+        self.run_process(cmd_restore_db)
+        logging.debug('Finished restoring')
+
+
+    def _dump_globals(self, dump_file: str = './dump/globals.sql'):
+        if os.path.exists(dump_file):
+            logging.warning(f'Dump file {dump_file} already exists! Using...')
+            return
+
+        logging.info(f'Dumping Globals to {dump_file}...')
+        cmd = [
+            'pg_dumpall', '-U', self.psql_admin, '-h', self.master_rds_address,
+            '-f', dump_file, '--no-role-passwords', '-g'
+        ]
+        self._run_process(cmd)
+        logging.debug('Finished Dumping Globals')
+
+
+    def _restore_globals(self, restore_file: str = './dump/globals.sql'):
+        logging.info(f'Restoring Globals from {restore_file}...')
+        if not os.path.exists(restore_file):
+            logging.error(f'file {restore_file} does not exist!')
+            return
+
+        cmd = [
+            'psql', '-U', self.psql_admin, '-h', self.new_rds_address,
+            '-d', 'postgres', '<', restore_file
+        ]
+        logging.debug(f"global restore cmd: {' '.join(cmd)}")
+        self._run_process(cmd, True)
+        logging.debug(f'global restore complete')
+
+
+    def _restore_password(self, user: str, password: str):
+        logging.info(f'restoring {user} password')
+        sql_reset = f"ALTER USER {user} WITH PASSWORD '{password}';"
+        sql_login = f"ALTER ROLE {user} LOGIN;"
+        cmd = [
+            'psql', '-U', self.psql_admin, '-h', self.new_rds_address,
+            '-d', 'postgres', '-c', sql_reset
+        ]
+        cmd2 = [
+            'psql', '-U', self.psql_admin, '-h', self.new_rds_address,
+            '-d', 'postgres', '-c', sql_login
+        ]
+        self._run_process(cmd)
+        self._run_process(cmd2)
+        logging.debug(f'password restore complete')
+
+
+    def _rds_instance_exists(self, instance_name: str) -> bool:
+        response = self.rds.describe_db_instances()
+        for instance in response['DBInstances']:
+            if instance['DBInstanceIdentifier'] == instance_name:
+                logging.warning(f"RDS instance {instance_name} already exists!")
+                return True
+        return False
+
+
+    def _get_rds_stats(self, id: str):
+        r = self.rds.describe_db_instances(DBInstanceIdentifier=id)
+        return r['DBInstances'][0]
+
+
+    def create_rds(self) -> str:
+        master_db_stats = self._get_rds_stats(self.master_rds_identifier)
+        if not self.master_rds_address:
+            self.master_rds_address = self._get_rds_address(master_db_stats)
+
+        logging.info(f"Master RDS address: {self.master_rds_address}")
+        vpc_security_group_ids = []
+        for group in master_db_stats['VpcSecurityGroups']:
+            vpc_security_group_ids.append(group['VpcSecurityGroupId'])
+        db_subnet_group_name = master_db_stats['DBSubnetGroup']['DBSubnetGroupName']
+        new_db_stats = {
+            'DBName': master_db_stats['DBName'],
+            'AllocatedStorage': self.allocated_storage,
+            'MaxAllocatedStorage': self.max_allocated_storage,
+            'DBInstanceIdentifier': self.new_rds_identifier,
+            'DBInstanceClass': master_db_stats['DBInstanceClass'],
+            'MasterUserPassword': self.psql_password,
+            'DBSubnetGroupName': db_subnet_group_name,
+            'Engine': master_db_stats['Engine'],
+            'EngineVersion': master_db_stats['EngineVersion'],
+            'MasterUsername': master_db_stats['MasterUsername'],
+            'AvailabilityZone': master_db_stats['AvailabilityZone'],
+            'PreferredMaintenanceWindow': master_db_stats['PreferredMaintenanceWindow'],
+            'BackupRetentionPeriod': master_db_stats['BackupRetentionPeriod'],
+            'VpcSecurityGroupIds': vpc_security_group_ids,
+            'AutoMinorVersionUpgrade': master_db_stats['AutoMinorVersionUpgrade'],
+            'CopyTagsToSnapshot': master_db_stats['CopyTagsToSnapshot'],
+            'DeletionProtection': master_db_stats['DeletionProtection'],
+            'EnableCloudwatchLogsExports': master_db_stats['EnabledCloudwatchLogsExports']
+        }
+        logging.info('Creating db instance. This will take a while...')
+        logging.debug(f'new db params: {new_db_stats}')
+        self.rds.create_db_instance(**new_db_stats)
+        waiter = self.rds.get_waiter('db_instance_available')
+        waiter.wait(DBInstanceIdentifier=self.new_rds_identifier)
+        logging.debug('Finished creating db instance')
+        return self._get_rds_address(self._get_rds_stats(self.new_rds_identifier))
+
+
+    def test_rds(self):
+        db_names = list(self.databases.keys())
+        if not self.master_rds_address:
+            self.master_rds_address = self._get_rds_address(self.master_rds_identifier)
+        if not self.new_rds_address:
+            self.new_rds_address = self._get_rds_address(self.new_rds_address)
+
+        logging.info(f"MASTER: {self.master_rds_address}")
+        logging.info(f"NEWRDS: {self.new_rds_address}")
+        conn = psycopg2.connect(
+            host=self.master_rds_address,
+            database='postgres',
+            user=self.psql_admin,
+            password=self.psql_password
+        )
+        nconn = psycopg2.connect(
+            host=self.new_rds_address,
+            database='postgres',
+            user=self.psql_admin,
+            password=self.psql_password
+        )
+
+        conn.set_session(readonly=True)
+        nconn.set_session(readonly=True)
+
+        cur = conn.cursor()
+        ncur = nconn.cursor()
+
+        logging.info(f"{'='*5} (active connections old/new) {'='*5}")
+        for db_name in db_names:
+            count = self._get_con_count(cur, db_name)
+            ncount = self._get_con_count(ncur, db_name)
+            logging.info(f"{db_name}: \t{count}/{ncount}")
+        logging.info(f"{'='*40}")
+
+        cur.close()
+        ncur.close()
+        conn.close()
+        nconn.close()
+
+        logging.info(f"{'='*8} (table count old/new) {'='*9}")
+        for db_name in db_names:
+            count = self._get_table_count(self.master_rds_address, db_name)
+            ncount = self._get_table_count(self.new_rds_address, db_name)
+            logging.info(f"{db_name}: \t{count}/{ncount}")
+        logging.info(f"{'='*40}")
+
+
+    def run(self, run_test: bool = True):
+        db_names = list(self.databases.keys())
+        if not self._rds_instance_exists(self.new_rds_identifier):
+            new_rds_address = self._create_rds(self.new_rds_identifier)
+            logging.info(f"New RDS Address: {new_rds_address}")
         else:
-            logging.critical(f"Error - check_db_use: no result on cur.fetchone()")
-            db_in_use = True
+            if self.reuse_new_rds:
+                logging.warning(f"rds instance {self.new_rds_identifier} exists, using...")
+                self.new_rds_address = self._get_rds_address(self.new_rds_identifier)
+                self.master_rds_address = self._get_rds_address(self.master_rds_identifier)
+            else:
+                logging.critical(f"rds instance {self.new_rds_identifier} exists!")
+                sys.exit(1)
 
-    # Close the cursor and connection
-    cur.close()
-    conn.close()
+        if not os.path.exists('./dump'):
+            os.makedirs('./dump')
 
-    return db_in_use
+        self._dump_globals()
+        self._restore_globals()
 
+        if self._check_dbs_in_use(db_names):
+            logging.critical("Databases in-use. Check Logs.")
+            sys.exit(1)
 
-def dump_db(db_name: str, dump_file: str = ''):
-    if not dump_file:
-        dump_file = f'./dump/{db_name}.dump'
+        for item in db_names:
+            self._dump_db(item)
 
-    if os.path.exists(dump_file):
-        logging.warning(f'Dump file {dump_file} already exists! Using...')
-        return
-    logging.info(f"Dumping db {db_name} to {dump_file}...")
-    cmd = [
-        'pg_dump', '-U', psql_admin, '-h', master_rds_address, '-F', 'c', '-f', dump_file, db_name
-    ]
-    run_process(cmd)
-    logging.debug(f"Finished dumping {db_name} to {dump_file}.")
+        for item in db_names:
+            self._restore_db(item)
+            try:
+                user = self.databases[item]['user']
+            except KeyError:
+                user = item
+            password = self.databases[item]['password']
+            self._restore_password(user, password)
 
+        if run_test:
+            self.test_rds()
 
-def restore_db(db_name: str, new_rds_address: str, restore_file: str = ''):
-    if not restore_file:
-        restore_file = f'./dump/{db_name}.dump'
-    logging.info(f'Restoring {db_name} db with {restore_file}...')
-    if not os.path.exists(restore_file):
-        logging.error(f'file {restore_file} does not exist!')
-        return
-    cmd_restore_db = [
-        'pg_restore', '-U', psql_admin, '-h', new_rds_address, '-F', 'c',
-        '--create', '-d', 'postgres', restore_file
-    ]
-    run_process(cmd_restore_db)
-    logging.debug('Finished restoring')
+        logging.info('Finished')
 
-
-def dump_globals(dump_file: str = './dump/globals.sql'):
-    if os.path.exists(dump_file):
-        logging.warning(f'Dump file {dump_file} already exists! Using...')
-        return
-
-    logging.info(f'Dumping Globals to {dump_file}...')
-    cmd = [
-        'pg_dumpall', '-U', psql_admin, '-h', master_rds_address, '-f', dump_file,
-        '--no-role-passwords', '-g'
-    ]
-    run_process(cmd)
-    logging.debug('Finished Dumping Globals')
-
-
-def restore_globals(new_rds_address: str, restore_file: str = './dump/globals.sql'):
-    logging.info(f'Restoring Globals from {restore_file}...')
-    if not os.path.exists(restore_file):
-        logging.error(f'file {restore_file} does not exist!')
-        return
-
-    cmd = [
-        'psql', '-U', psql_admin, '-h', new_rds_address,
-        '-d', 'postgres', '<', restore_file
-    ]
-    logging.debug(f"global restore cmd: {' '.join(cmd)}")
-    run_process(cmd, True)
-    logging.debug(f'global restore complete')
-
-
-def restore_password(user: str, password: str, new_rds_address: str):
-    logging.info(f'restoring {user} password')
-    sql_reset = f"ALTER USER {user} WITH PASSWORD '{password}';"
-    sql_login = f"ALTER ROLE {user} LOGIN;"
-    cmd = [
-        'psql', '-U', psql_admin, '-h', new_rds_address,
-        '-d', 'postgres', '-c', sql_reset
-    ]
-    cmd2 = [
-        'psql', '-U', psql_admin, '-h', new_rds_address,
-        '-d', 'postgres', '-c', sql_login
-    ]
-    run_process(cmd)
-    run_process(cmd2)
-    logging.debug(f'password restore complete')
-
-
-def rds_instance_exists(instance_name: str) -> bool:
-    response = rds.describe_db_instances()
-    for instance in response['DBInstances']:
-        if instance['DBInstanceIdentifier'] == instance_name:
-            logging.warning(f"RDS instance {instance_name} already exists!")
-            return True
-    return False
-
-
-def get_rds_address(instance_name: str) -> str:
-    result = rds.describe_db_instances(DBInstanceIdentifier=instance_name)
-    rds_stats = result['DBInstances'][0]
-    address = rds_stats['Endpoint']['Address']
-    return address
-
-
-def create_rds(db_identifier: str) -> str:
-    """
-    Create a new RDS instance and return the address.
-
-    Args:
-        db_identifier (str): Newly created rds identifier
-
-    Returns:
-        str: The rds endpoint address associated with the new instance
-    """
-    global master_rds_address
-    allocated_storage = config['allocated_storage']
-    max_allocated_storage = config['max_allocated_storage']
-    master_db_identifier = config['master_rds_identifier']
-    result = rds.describe_db_instances(DBInstanceIdentifier=master_db_identifier)
-    master_db_stats = result['DBInstances'][0]
-    master_rds_address = master_db_stats['Endpoint']['Address']
-    print(f"Master RDS address: {master_rds_address}")
-    logging.info(f"Master RDS address: {master_rds_address}")
-    vpc_security_group_ids = []
-    for group in master_db_stats['VpcSecurityGroups']:
-        vpc_security_group_ids.append(group['VpcSecurityGroupId'])
-    db_subnet_group_name = master_db_stats['DBSubnetGroup']['DBSubnetGroupName']
-    new_db_stats = {
-        'DBName': master_db_stats['DBName'],
-        'AllocatedStorage': allocated_storage,
-        'MaxAllocatedStorage': max_allocated_storage,
-        'DBInstanceIdentifier': db_identifier,
-        'DBInstanceClass': master_db_stats['DBInstanceClass'],
-        'MasterUserPassword': psql_password,
-        'DBSubnetGroupName': db_subnet_group_name,
-        'Engine': master_db_stats['Engine'],
-        'EngineVersion': master_db_stats['EngineVersion'],
-        'MasterUsername': master_db_stats['MasterUsername'],
-        'AvailabilityZone': master_db_stats['AvailabilityZone'],
-        'PreferredMaintenanceWindow': master_db_stats['PreferredMaintenanceWindow'],
-        # 'PreferredBackupWindow': master_db_stats['PreferredMaintenanceWindow'],
-        'BackupRetentionPeriod': master_db_stats['BackupRetentionPeriod'],
-        'VpcSecurityGroupIds': vpc_security_group_ids,
-        'AutoMinorVersionUpgrade': master_db_stats['AutoMinorVersionUpgrade'],
-        # 'TagList': master_db_stats['TagList'],
-        # StorageEncrypted is not supported with db.t2.micro
-        # 'StorageEncrypted': master_db_stats['StorageEncrypted'],
-        'CopyTagsToSnapshot': master_db_stats['CopyTagsToSnapshot'],
-        # MonitoringRoleARN is required when value is different than '0'
-        # 'MonitoringInterval': master_db_stats['MonitoringInterval'],
-        'DeletionProtection': master_db_stats['DeletionProtection'],
-        'EnableCloudwatchLogsExports': master_db_stats['EnabledCloudwatchLogsExports']
-    }
-    logging.info('Creating db instance. This will take a while...')
-    logging.debug(f'new db params: {new_db_stats}')
-    rds.create_db_instance(**new_db_stats)
-
-    # Wait for the instance to become available
-    waiter = rds.get_waiter('db_instance_available')
-    waiter.wait(DBInstanceIdentifier=db_identifier)
-    logging.debug('Finished creating db instance')
-    result = rds.describe_db_instances(DBInstanceIdentifier=db_identifier)
-    new_db_stats = result['DBInstances'][0]
-    logging.debug(f'Created db with stats: {new_db_stats}')
-    return new_db_stats['Endpoint']['Address']
-
-
-def main():
-    global rds
-    global config
-    global psql_admin
-    global master_rds_address
-
-    global aws_access_key_id
-    global aws_secret_access_key
-    global aws_default_region
-    global psql_password
-
-    config = get_config()
-    rds = boto3.client('rds')
-    os.environ["AWS_ACCESS_KEY_ID"] = config['aws_access_key_id']
-    os.environ["AWS_SECRET_ACCESS_KEY"] = config['aws_secret_access_key']
-    os.environ["AWS_DEFAULT_REGION"] = config['aws_region']
-    os.environ["PGPASSWORD"] = config['psql_password']
-    db_items = config['databases']
-    psql_admin = config['psql_admin']
-    db_names = list(db_items.keys())
-
-    logging.basicConfig(
-        filename='resize.log',
-        format='%(levelname)s: %(asctime)s %(message)s',
-        datefmt='%m/%d/%Y %H:%M:%S',
-        level=logging.INFO
-    )
-    if not rds_instance_exists(config['new_rds_identifier']):
-        new_rds_address = create_rds(config['new_rds_identifier'])
-        add_str = f"New RDS Address: {new_rds_address}"
-        print(add_str)
-        logging.info(add_str)
-    else:
-        if config['reuse_new_rds']:
-            logging.warning(f"rds instance {config['new_rds_identifier']} exists, using...")
-            new_rds_address = get_rds_address(config['new_rds_identifier'])
-            master_rds_address = get_rds_address(config['master_rds_identifier'])
-        else:
-            logging.critical(f"rds instance {config['new_rds_identifier']} exists!")
-            sys.exit()
-    if not os.path.exists('./dump'):
-        os.makedirs('./dump')
-    dump_globals()
-    restore_globals(new_rds_address)
-    if check_dbs_in_use(db_names):
-        print("Databases in-use. Check Logs.")
-        sys.exit(1)
-    for item in db_names:
-        dump_db(item)
-    for item in db_names:
-        restore_db(item, new_rds_address)
-        try:
-            user = db_items[item]['user']
-        except KeyError:
-            user = item
-        password = db_items[item]['password']
-        restore_password(user, password, new_rds_address)
-    logging.info('Fin')
 
 
 if __name__ == '__main__':
-    args = get_args()
+    r = ResizeRDS()
+    args = r.args
     if args.test:
-        print("WIP")
-        # test_rds()
+        r.test_rds()
     else:
-        main()
+        r.run()

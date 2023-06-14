@@ -1,3 +1,5 @@
+# INFO: set file mode to 0600
+
 master_rds_identifier: master-rds
 new_rds_identifier: db-test1
 databases:
