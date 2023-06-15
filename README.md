@@ -161,7 +161,7 @@ Enable Puppet agent on services that use RDS:
 Run puppet agent to ensure that configs are updated even if the puppet systemd
 service is down for whatever reason:
 
-    $ bolt command run "/opt/puppetlabs/bin/puppet agent -t" --run-as root -t rds_users
+    $ bolt command run "/opt/puppetlabs/bin/puppet agent --onetime --verbose --show_diff --no-daemonize" --run-as root -t rds_users
 
 Restart the services that use RDS:
 
