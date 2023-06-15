@@ -165,4 +165,4 @@ service is down for whatever reason:
 
 Restart the services that use RDS:
 
-    $ bolt task run namespace::manipulate_services op=restart --run-as root -t rds_users
+    $ bolt task run namespace::manipulate_animal_services op=restart --run-as root -t rds_users
