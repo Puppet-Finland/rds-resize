@@ -4,6 +4,7 @@
 # NOTE: connection string: psql -h $PGIP db_name db_user
 
 from subprocess import Popen, PIPE
+from shutil import rmtree
 import yaml
 import psycopg2
 import boto3
@@ -23,7 +24,7 @@ class ResizeRDS:
 
     @staticmethod
     def _get_rds_address(stats) -> str:
-        return stats['Endpoint']['Addresss']
+        return stats['Endpoint']['Address']
 
 
     def __init__(self, cf: str = "config.yaml"):
@@ -37,10 +38,9 @@ class ResizeRDS:
         os.environ["AWS_DEFAULT_REGION"]    = str(c['aws_region'])
         os.environ["PGPASSWORD"]            = str(c['psql_password'])
 
-        self.master_rds_address = ''
-        self.new_rds_address    = ''
+        self.new_rds_address = ''
 
-        self.master_rds_address    = c['master_rds_identifier']
+        self.psql_password         = c['psql_password']
         self.databases             = c['databases']
         self.psql_admin            = c['psql_admin']
         self.master_rds_identifier = c['master_rds_identifier']
@@ -52,6 +52,7 @@ class ResizeRDS:
 
 
         self.rds = boto3.client('rds')
+        self.master_rds_address = self._get_rds_address(self._get_rds_stats(self.master_db_identifier))
 
 
     def __del__(self):
@@ -93,13 +94,6 @@ class ResizeRDS:
         logger.setLevel(log_level)
 
 
-    def _get_rds_address(self, name: str) -> str:
-        result = self.rds.describe_db_instances(DBInstanceIdentifier=name)
-        rds_stats = result['DBInstances'][0]
-        address = rds_stats['Endpoint']['Address']
-        return address
-
-
     def _get_con_count(self, cur, db_name: str) -> int | None:
         cur.execute(f"""
                 SELECT count(*) FROM pg_stat_activity
@@ -133,7 +127,6 @@ class ResizeRDS:
         return None
 
     def _run_process(self, cmd: list[str], use_shell: bool = False):
-        logging.debug(f'launching process with cmd: {cmd}')
         if use_shell:
             cmd = ' '.join(cmd)
         p = Popen(cmd, stdout=PIPE, stderr=PIPE, shell=use_shell)
@@ -187,10 +180,11 @@ class ResizeRDS:
         logging.info(f"Dumping db {db_name} to {dump_file}...")
         cmd = [
             'pg_dump', '-U', self.psql_admin, '-h', self.master_rds_address,
-            '-F', 'c', '-f', self.dump_file, self.db_name
+            '-F', 'c', '-f', dump_file, db_name
         ]
+        logging.info(f"Dumping with cmd: {cmd}")
         self._run_process(cmd)
-        logging.debug(f"Finished dumping {db_name} to {dump_file}.")
+        logging.info(f"Finished dumping {db_name} to {dump_file}.")
 
 
     def _restore_db(self, db_name: str, restore_file: str = ''):
@@ -204,8 +198,10 @@ class ResizeRDS:
             'pg_restore', '-U', self.psql_admin, '-h', self.new_rds_address,
             '-F', 'c', '--create', '-d', 'postgres', restore_file
         ]
-        self.run_process(cmd_restore_db)
-        logging.debug('Finished restoring')
+
+        logging.info(f"Restoring db with cmd: {cmd_restore_db}")
+        self._run_process(cmd_restore_db)
+        logging.info('Finished restoring')
 
 
     def _dump_globals(self, dump_file: str = './dump/globals.sql'):
@@ -218,8 +214,10 @@ class ResizeRDS:
             'pg_dumpall', '-U', self.psql_admin, '-h', self.master_rds_address,
             '-f', dump_file, '--no-role-passwords', '-g'
         ]
+        logging.info(f'Dumping globals with cmd: {cmd}')
         self._run_process(cmd)
-        logging.debug('Finished Dumping Globals')
+        logging.info('Finished Dumping Globals')
+
 
 
     def _restore_globals(self, restore_file: str = './dump/globals.sql'):
@@ -232,9 +230,9 @@ class ResizeRDS:
             'psql', '-U', self.psql_admin, '-h', self.new_rds_address,
             '-d', 'postgres', '<', restore_file
         ]
-        logging.debug(f"global restore cmd: {' '.join(cmd)}")
+        logging.info(f"global restore cmd: {' '.join(cmd)}")
         self._run_process(cmd, True)
-        logging.debug(f'global restore complete')
+        logging.info(f'global restore complete')
 
 
     def _restore_password(self, user: str, password: str):
@@ -249,9 +247,13 @@ class ResizeRDS:
             'psql', '-U', self.psql_admin, '-h', self.new_rds_address,
             '-d', 'postgres', '-c', sql_login
         ]
+
+
+        logging.info(f"Restore password cmd-1: {cmd}")
         self._run_process(cmd)
+        logging.info(f"Restore password cmd-2: {cmd2}")
         self._run_process(cmd2)
-        logging.debug(f'password restore complete')
+        logging.info(f'Restoring password complete')
 
 
     def _rds_instance_exists(self, instance_name: str) -> bool:
@@ -270,8 +272,6 @@ class ResizeRDS:
 
     def create_rds(self) -> str:
         master_db_stats = self._get_rds_stats(self.master_rds_identifier)
-        if not self.master_rds_address:
-            self.master_rds_address = self._get_rds_address(master_db_stats)
 
         logging.info(f"Master RDS address: {self.master_rds_address}")
         vpc_security_group_ids = []
@@ -303,16 +303,16 @@ class ResizeRDS:
         self.rds.create_db_instance(**new_db_stats)
         waiter = self.rds.get_waiter('db_instance_available')
         waiter.wait(DBInstanceIdentifier=self.new_rds_identifier)
-        logging.debug('Finished creating db instance')
+        logging.info('Finished creating db instance')
         return self._get_rds_address(self._get_rds_stats(self.new_rds_identifier))
 
 
     def test_rds(self):
         db_names = list(self.databases.keys())
         if not self.master_rds_address:
-            self.master_rds_address = self._get_rds_address(self.master_rds_identifier)
+            self.master_rds_address = self._get_rds_address(self._get_rds_stats(self.master_rds_identifier))
         if not self.new_rds_address:
-            self.new_rds_address = self._get_rds_address(self.new_rds_address)
+            self.new_rds_address = self._get_rds_address(self._get_rds_stats(self.new_rds_identifier))
 
         logging.info(f"MASTER: {self.master_rds_address}")
         logging.info(f"NEWRDS: {self.new_rds_address}")
@@ -357,27 +357,30 @@ class ResizeRDS:
 
     def run(self, run_test: bool = True):
         db_names = list(self.databases.keys())
-        if not self._rds_instance_exists(self.new_rds_identifier):
-            new_rds_address = self._create_rds(self.new_rds_identifier)
-            logging.info(f"New RDS Address: {new_rds_address}")
-        else:
-            if self.reuse_new_rds:
-                logging.warning(f"rds instance {self.new_rds_identifier} exists, using...")
-                self.new_rds_address = self._get_rds_address(self.new_rds_identifier)
-                self.master_rds_address = self._get_rds_address(self.master_rds_identifier)
-            else:
-                logging.critical(f"rds instance {self.new_rds_identifier} exists!")
-                sys.exit(1)
-
-        if not os.path.exists('./dump'):
-            os.makedirs('./dump')
-
-        self._dump_globals()
-        self._restore_globals()
 
         if self._check_dbs_in_use(db_names):
             logging.critical("Databases in-use. Check Logs.")
             sys.exit(1)
+
+        if os.path.exists('./dump'):
+            rmtree('./dump', ignore_errors=True)
+        os.makedirs('./dump')
+
+        if not self._rds_instance_exists(self.new_rds_identifier):
+            self.new_rds_address = self.create_rds()
+            logging.info(f"New RDS Address: {self.new_rds_address}")
+        else:
+            if self.reuse_new_rds:
+                logging.warning(f"rds instance {self.new_rds_identifier} exists, using...")
+                self.new_rds_address = self._get_rds_address(self._get_rds_stats(self.new_rds_identifier))
+            else:
+                logging.critical(f"rds instance {self.new_rds_identifier} exists!")
+                sys.exit(1)
+
+
+        self._dump_globals()
+        self._restore_globals()
+
 
         for item in db_names:
             self._dump_db(item)
