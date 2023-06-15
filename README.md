@@ -102,7 +102,7 @@ You should get
 
 in return if you successfully stopped all processes that used the database. If count is not 0, you have something still using the database. You can get the IP of that something with the following spell:
 
-    PGPASSWORD=<rds-admin-password> psql -h <old-rds-instance-endpoint> <rds-admin-user> postgres -c "SELECT datname,client_addr FROM pg_stat_activity;"
+    PGPASSWORD=<rds-admin-password> psql -h <old-rds-instance-endpoint> postgres <rds-admin-user> -c "SELECT datname,client_addr FROM pg_stat_activity;"
 
 If the offending IP belongs to a Linux machine you can locate the offending process fairly easily:
 
