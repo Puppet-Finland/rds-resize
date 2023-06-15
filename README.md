@@ -92,7 +92,7 @@ connections and if so, it will stop. However, it is best to make sure that all
 connections are closed before you even start the script. Here's a one-liner to
 do it for a single database:
 
-    PGPASSWORD=<rds-admin-password> psql -h <old-rds-instance-endpoint> <rds-admin-user> postgres -c "SELECT count(*) FROM pg_stat_activity WHERE datname = '<database>' AND state = 'active';"
+    PGPASSWORD=<rds-admin-password> psql -h <old-rds-instance-endpoint> postgres <rds-admin-user> -c "SELECT count(*) FROM pg_stat_activity WHERE datname = '<database>' AND state = 'active';"
 
 You should get
 
