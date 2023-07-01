@@ -134,4 +134,9 @@ fix that from RDS console:
     ALTER USER myuser PASSWORD 'supersecret';
     ALTER ROLE myuser LOGIN;
 
-Repeat this for all RDS users that have issues.
+Some of the other user properties might have issues and might require manual
+intervention. For example:
+
+    ALTER ROLE myuser NOINHERIT;
+
+Repeat these for all RDS users that have issues.
