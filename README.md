@@ -113,6 +113,8 @@ Typically the connected process would be a system service or a container. In tha
     $ kill <pid>
     $ kill -9 <pid>
 
+Alternatively you can try to kill the connection from server side. For details see [this article](https://dataedo.com/kb/query/postgresql/kill-session).
+
 Once all connections to the database are down you can proceed with running the script.
 
 ## Launch the RDS resizing container
@@ -170,3 +172,13 @@ Restart the services that use RDS:
 Check status of services that use RDS:
 
     $ bolt task run namespace::manipulate_animal_services op=is-active --run-as root -t rds_users
+
+# Troubleshooting
+
+If for whatever reason passwords did not get set correctly, you can manually
+fix that from RDS console:
+
+    ALTER USER myuser PASSWORD 'supersecret';
+    ALTER ROLE myuser LOGIN;
+
+Repeat this for all RDS users that have issues.
