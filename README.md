@@ -17,6 +17,9 @@ The main requirement is [Podman](https://podman.io/). You can run the resizing
 script without Podman, but you need to make sure that your environment is set
 up just right.
 
+You can use the [rhel9-setup-rds-resize.sh](rhel9-setup-rds-resize.sh) to set
+up an environment with Podman and rds-resize.
+
 ## Run Steps
 
 ## Create a configuration file
@@ -124,7 +127,6 @@ Resize logs will be written to *resize.log* (*/rds* in the container, *src* on
 the host). It is recommended to tail the logs while resizing is in progress:
 
     $ tail -f ./src/resize.log
-
 
 # Troubleshooting
 
