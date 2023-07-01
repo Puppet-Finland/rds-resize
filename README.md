@@ -71,20 +71,6 @@ You can use netcat for example to test that your old RDS instance is reachable:
     Ncat: Connected to 10.10.10.200:5432.
     Ncat: 0 bytes sent, 0 bytes received in 0.26 seconds.
 
-## Back up databases
-
-    $ bolt task run namespace::backup_rds --run-as root -t db_server.example.com
-
-## Stop services that use RDS
-
-First disable Puppet Agents for RDS-using services:
-
-    $ bolt command run "/opt/puppetlabs/bin/puppet agent --disable" --run-as root -t rds_users
-
-Then stop the servers that use RDS:
-
-    $ bolt task run namespace::manipulate_services op=stop --run-as root -t rds_users
-
 ## Make sure that nothing is connected to the databases
 
 The script checks whether any of the databases your dumping have active
@@ -139,39 +125,6 @@ the host). It is recommended to tail the logs while resizing is in progress:
 
     $ tail -f ./src/resize.log
 
-## Update RDS domain in Hiera
-
-Modify *cloud-control/data/deployments/<deployment>.yaml* to point to the new
-RDS instance. For example:
-
-    -psql_domain: 'example-postgre-120.asdf123zxy.us-west-2.rds.amazonaws.com'
-    +psql_domain: 'example-postgre-090.asdf123zxy.us-west-2.rds.amazonaws.com'
-
-Commit the change to the correct branch ("production", "beta") and push it.
-Cherry-pick it to the other branches.
-
-## Deploy RDS domain change to RDS services
-
-Deploy your updated branch with r10k. For example in beta:
-
-    $ bolt task run namespace::deploy_feature_branch branch=beta --run-as root -t puppet.example.com
-
-Enable Puppet agent on services that use RDS:
-
-    $ bolt command run "/opt/puppetlabs/bin/puppet agent --enable" --run-as root -t rds_users
-
-Run puppet agent to ensure that configs are updated even if the puppet systemd
-service is down for whatever reason:
-
-    $ bolt command run "/opt/puppetlabs/bin/puppet agent --onetime --verbose --show_diff --no-daemonize" --run-as root -t rds_users
-
-Restart the services that use RDS:
-
-    $ bolt task run namespace::manipulate_animal_services op=restart --run-as root -t rds_users
-
-Check status of services that use RDS:
-
-    $ bolt task run namespace::manipulate_animal_services op=is-active --run-as root -t rds_users
 
 # Troubleshooting
 
