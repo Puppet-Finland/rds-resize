@@ -49,6 +49,7 @@ class ResizeRDS:
         self.max_allocated_storage = c['max_allocated_storage']
         self.master_db_identifier  = c['master_rds_identifier']
         self.reuse_new_rds         = c['reuse_new_rds']
+        self.accounts              = c['accounts']
 
 
         self.rds = boto3.client('rds')
@@ -288,6 +289,7 @@ class ResizeRDS:
             'DBSubnetGroupName': db_subnet_group_name,
             'Engine': master_db_stats['Engine'],
             'EngineVersion': master_db_stats['EngineVersion'],
+            'StorageEncrypted': master_db_stats['StorageEncrypted'],
             'MasterUsername': master_db_stats['MasterUsername'],
             'AvailabilityZone': master_db_stats['AvailabilityZone'],
             'PreferredMaintenanceWindow': master_db_stats['PreferredMaintenanceWindow'],
@@ -308,7 +310,7 @@ class ResizeRDS:
 
 
     def test_rds(self):
-        db_names = list(self.databases.keys())
+        db_names = self.databases
         if not self.master_rds_address:
             self.master_rds_address = self._get_rds_address(self._get_rds_stats(self.master_rds_identifier))
         if not self.new_rds_address:
@@ -356,7 +358,7 @@ class ResizeRDS:
 
 
     def run(self, run_test: bool = True):
-        db_names = list(self.databases.keys())
+        db_names = self.databases
 
         if self._check_dbs_in_use(db_names):
             logging.critical("Databases in-use. Check Logs.")
@@ -387,18 +389,13 @@ class ResizeRDS:
 
         for item in db_names:
             self._restore_db(item)
-            try:
-                user = self.databases[item]['user']
-            except KeyError:
-                user = item
-            password = self.databases[item]['password']
-            self._restore_password(user, password)
-
+            for user in self.accounts:
+                password = self.accounts[user]
+                self._restore_password(user, password)
         if run_test:
             self.test_rds()
 
         logging.info('Finished')
-
 
 
 if __name__ == '__main__':
