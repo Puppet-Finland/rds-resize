@@ -128,17 +128,29 @@ the host). It is recommended to tail the logs while resizing is in progress:
 
     $ tail -f ./src/resize.log
 
-# Troubleshooting
+# Known issues
 
-If for whatever reason passwords did not get set correctly, you can manually
-fix that from RDS console:
+You may get harmless but nasty-looking errors in the RDS resize logs:
 
-    ALTER USER myuser PASSWORD 'supersecret';
-    ALTER ROLE myuser LOGIN;
+```
+ERROR:  must be superuser to alter superusers
+ERROR:  Cannot issue GRANT on the "rds_superuser" role.
+```
 
-Some of the other user properties might have issues and might require manual
-intervention. For example:
+Or, you may get something like this:
 
-    ALTER ROLE myuser NOINHERIT;
+```
+ERROR: 08/10/2023 08:17:53 b'pg_restore: [archiver (db)]
+  Error while PROCESSING TOC:
+  pg_restore: [archiver (db)]
+  Error from TOC entry 4970; 1262 16396 DATABASE mydb myuser
+  pg_restore: [archiver (db)] could not execute query:
+  ERROR:  database "mydb" already exists
+  Command was: CREATE DATABASE mydb WITH TEMPLATE = template0
+  ENCODING = \'UTF8\' LC_COLLATE = \'en_US.UTF-8\'
+  LC_CTYPE = \'en_US.UTF-8\';\n\n\
+  WARNING: errors ignored on restore: 1\n
+```
 
-Repeat these for all RDS users that have issues.
+Both error types seem to be harmless and do not indicate failure of the
+resizing operation.
