@@ -14,3 +14,4 @@ RUN apt-get update && \
 RUN pip3 install boto3 psycopg2 pyyaml
 
 VOLUME ["/rds"]
+WORKDIR /rds
