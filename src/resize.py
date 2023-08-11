@@ -97,12 +97,19 @@ class ResizeRDS:
 
 
     def _get_con_count(self, cur, db_name: str) -> int | None:
+        # TODO: add warning when there is a connection with no client_addr (example. vaccum aws service)
         cur.execute(f"""
                 SELECT count(*) FROM pg_stat_activity
-                WHERE datname = '{db_name}';
+                WHERE datname = '{db_name}' AND client_addr IS NOT NULL;
             """)
         result = cur.fetchone()
-        if result is not None:
+        if result[0]:
+            cur.execute(f"""
+                SELECT client_addr FROM pg_stat_activity
+                WHERE datname = '{db_name}' AND client_addr IS NOT NULL;
+            """)
+            connections = set(cur.fetchall()[0])
+            logging.critical(f"{db_name} has active connections: {list(connections)}")
             return result[0]
         return None
 
@@ -155,14 +162,7 @@ class ResizeRDS:
 
         cur = conn.cursor()
         for db_name in db_names:
-
-            count = self._get_con_count(cur, db_name)
-            if count is not None:
-                if count > 0:
-                    db_in_use = True
-                    logging.critical(f"ERROR: {db_name} in use!")
-            else:
-                logging.critical(f"Error - check_db_use: no result on cur.fetchone()")
+            if self._get_con_count(cur, db_name):
                 db_in_use = True
 
         # Close the cursor and connection
@@ -371,11 +371,11 @@ class ResizeRDS:
         print(f"({self.args.info.upper()}) Address: {address}")
         print(f"PGPASSWORD={self.psql_password} psql -h {address} postgres {self.psql_admin}")
 
+
     def run(self, run_test: bool = True):
         db_names = self.databases
 
         if self._check_dbs_in_use(db_names):
-            logging.critical("Databases in-use. Check Logs.")
             sys.exit(1)
 
         if os.path.exists('./dump'):
