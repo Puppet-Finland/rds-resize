@@ -68,6 +68,7 @@ class ResizeRDS:
                         epilog='Script will loop through databases \
                                 and dump/copy data to newly created rds instance.')
         parser.add_argument('-t', '--test', action='store_true')
+        parser.add_argument('-i', '--info', help='Print hostname and psql connection string for testing.', choices=['old', 'new'], const='old', nargs='?')
         parser.add_argument('-v', '--verbose', action='store_true')
         parser.add_argument('-l', '--loglevel', choices=['debug', 'info', 'warning', 'error'],
                             default='info', help='Set the log level')
@@ -317,7 +318,7 @@ class ResizeRDS:
         if not self.master_rds_address:
             self.master_rds_address = self._get_rds_address(self._get_rds_stats(self.master_rds_identifier))
         if not self.new_rds_address:
-            self.new_rds_address = self._get_rds_address(self._get_rds_stats(self.new_rds_identifier))
+            self.new_rds_address = self._get_rds_address(self._get_rds_stats(self.new_rds_identifier)) | "NOT FOUND"
 
         logging.info(f"MASTER: {self.master_rds_address}")
         logging.info(f"NEWRDS: {self.new_rds_address}")
@@ -359,6 +360,16 @@ class ResizeRDS:
             logging.info(f"{db_name}: \t{count}/{ncount}")
         logging.info(f"{'='*40}")
 
+
+    def print_info(self):
+        address = ''
+        if self.args.info == 'new':
+            address = self._get_rds_address(self._get_rds_stats(self.new_rds_identifier))
+        else:
+            address = self._get_rds_address(self._get_rds_stats(self.master_rds_identifier))
+
+        print(f"({self.args.info.upper()}) Address: {address}")
+        print(f"PGPASSWORD={self.psql_password} psql -h {address} postgres {self.psql_admin}")
 
     def run(self, run_test: bool = True):
         db_names = self.databases
@@ -408,5 +419,7 @@ if __name__ == '__main__':
     args = r.args
     if args.test:
         r.test_rds()
+    elif args.info:
+        r.print_info()
     else:
         r.run()
