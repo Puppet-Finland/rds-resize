@@ -153,8 +153,8 @@ class ResizeRDS:
         )
 
         cur = conn.cursor()
-
         for db_name in db_names:
+
             count = self._get_con_count(cur, db_name)
             if count is not None:
                 if count > 0:
@@ -298,7 +298,10 @@ class ResizeRDS:
             'AutoMinorVersionUpgrade': master_db_stats['AutoMinorVersionUpgrade'],
             'CopyTagsToSnapshot': master_db_stats['CopyTagsToSnapshot'],
             'DeletionProtection': master_db_stats['DeletionProtection'],
-            'EnableCloudwatchLogsExports': master_db_stats['EnabledCloudwatchLogsExports']
+            'EnableCloudwatchLogsExports': master_db_stats['EnabledCloudwatchLogsExports'],
+            'EnablePerformanceInsights': master_db_stats['EnablePerformanceInsights'],
+            'DBParameterGroupName': master_db_stats['DBParameterGroupName'],
+            'MonitoringRoleArn': master_db_stats['MonitoringRoleArn'],
         }
         logging.info('Creating db instance. This will take a while...')
         logging.debug(f'new db params: {new_db_stats}')
