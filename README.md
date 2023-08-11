@@ -131,6 +131,13 @@ the host). It is recommended to tail the logs while resizing is in progress:
 
 # Known issues
 
+## Tags
+
+Right now tags don't get copied over to the new instance. There is no
+technical limitation for this, it just has not been done yet.
+
+## Harmless errors
+
 You may get harmless but nasty-looking errors in the RDS resize logs:
 
 ```
