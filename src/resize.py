@@ -389,9 +389,11 @@ class ResizeRDS:
 
         for item in db_names:
             self._restore_db(item)
-            for user in self.accounts:
-                password = self.accounts[user]
-                self._restore_password(user, password)
+
+        for user in self.accounts:
+            password = self.accounts[user]
+            self._restore_password(user, password)
+
         if run_test:
             self.test_rds()
 
