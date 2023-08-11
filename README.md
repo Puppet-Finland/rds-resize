@@ -32,7 +32,8 @@ Create a *./src/config.yaml* file based on the example. The settings are as foll
 * *max_allocated_storage*: the maximum allocated storage. This affects RDS automatic storage size increases only.
 * *psql_admin*: name of the RDS admin user. All SQL operations run as this user.
 * *reuse_new_rds*: use an existing *new* RDS instance, if present. Useful when debugging data dump/restore issues orwhen you get connection interruptions during the process and would otherwise have to start from scratch.
-* *databases*: a list of databases to dump from the old database and restore to the new database. The key is the database name. If *user* is not defined, the script assumes that the user name matches the database name. You also need to define *password* for the database user as that can't be dumped and restored like normal data.
+* *databases*: a list of databases to dump from the old database and restore to the new database.
+* *accounts*: list of hashes where the key is the user and the value is the password. These will be set on new database.
 * *aws_access_key_id* AWS API key id.
 * *aws_secret_access_key*: AWS API key.
 * *aws_region*: default region for aws.
