@@ -68,6 +68,7 @@ class ResizeRDS:
                         epilog='Script will loop through databases \
                                 and dump/copy data to newly created rds instance.')
         parser.add_argument('-t', '--test', action='store_true')
+        parser.add_argument('-i', '--info', help='Print hostname and psql connection string for testing.', choices=['old', 'new'], const='old', nargs='?')
         parser.add_argument('-v', '--verbose', action='store_true')
         parser.add_argument('-l', '--loglevel', choices=['debug', 'info', 'warning', 'error'],
                             default='info', help='Set the log level')
@@ -96,12 +97,19 @@ class ResizeRDS:
 
 
     def _get_con_count(self, cur, db_name: str) -> int | None:
+        # TODO: add warning when there is a connection with no client_addr (example. vaccum aws service)
         cur.execute(f"""
                 SELECT count(*) FROM pg_stat_activity
-                WHERE datname = '{db_name}';
+                WHERE datname = '{db_name}' AND client_addr IS NOT NULL;
             """)
         result = cur.fetchone()
-        if result is not None:
+        if result[0]:
+            cur.execute(f"""
+                SELECT client_addr FROM pg_stat_activity
+                WHERE datname = '{db_name}' AND client_addr IS NOT NULL;
+            """)
+            connections = set(cur.fetchall()[0])
+            logging.critical(f"{db_name} has active connections: {list(connections)}")
             return result[0]
         return None
 
@@ -153,15 +161,8 @@ class ResizeRDS:
         )
 
         cur = conn.cursor()
-
         for db_name in db_names:
-            count = self._get_con_count(cur, db_name)
-            if count is not None:
-                if count > 0:
-                    db_in_use = True
-                    logging.critical(f"ERROR: {db_name} in use!")
-            else:
-                logging.critical(f"Error - check_db_use: no result on cur.fetchone()")
+            if self._get_con_count(cur, db_name):
                 db_in_use = True
 
         # Close the cursor and connection
@@ -298,7 +299,10 @@ class ResizeRDS:
             'AutoMinorVersionUpgrade': master_db_stats['AutoMinorVersionUpgrade'],
             'CopyTagsToSnapshot': master_db_stats['CopyTagsToSnapshot'],
             'DeletionProtection': master_db_stats['DeletionProtection'],
-            'EnableCloudwatchLogsExports': master_db_stats['EnabledCloudwatchLogsExports']
+            'EnableCloudwatchLogsExports': master_db_stats['EnabledCloudwatchLogsExports'],
+            'EnablePerformanceInsights': master_db_stats['EnablePerformanceInsights'],
+            'DBParameterGroupName': master_db_stats['DBParameterGroupName'],
+            'MonitoringRoleArn': master_db_stats['MonitoringRoleArn'],
         }
         logging.info('Creating db instance. This will take a while...')
         logging.debug(f'new db params: {new_db_stats}')
@@ -314,7 +318,7 @@ class ResizeRDS:
         if not self.master_rds_address:
             self.master_rds_address = self._get_rds_address(self._get_rds_stats(self.master_rds_identifier))
         if not self.new_rds_address:
-            self.new_rds_address = self._get_rds_address(self._get_rds_stats(self.new_rds_identifier))
+            self.new_rds_address = self._get_rds_address(self._get_rds_stats(self.new_rds_identifier)) | "NOT FOUND"
 
         logging.info(f"MASTER: {self.master_rds_address}")
         logging.info(f"NEWRDS: {self.new_rds_address}")
@@ -357,11 +361,21 @@ class ResizeRDS:
         logging.info(f"{'='*40}")
 
 
+    def print_info(self):
+        address = ''
+        if self.args.info == 'new':
+            address = self._get_rds_address(self._get_rds_stats(self.new_rds_identifier))
+        else:
+            address = self._get_rds_address(self._get_rds_stats(self.master_rds_identifier))
+
+        print(f"({self.args.info.upper()}) Address: {address}")
+        print(f"PGPASSWORD={self.psql_password} psql -h {address} postgres {self.psql_admin}")
+
+
     def run(self, run_test: bool = True):
         db_names = self.databases
 
         if self._check_dbs_in_use(db_names):
-            logging.critical("Databases in-use. Check Logs.")
             sys.exit(1)
 
         if os.path.exists('./dump'):
@@ -389,9 +403,11 @@ class ResizeRDS:
 
         for item in db_names:
             self._restore_db(item)
-            for user in self.accounts:
-                password = self.accounts[user]
-                self._restore_password(user, password)
+
+        for user in self.accounts:
+            password = self.accounts[user]
+            self._restore_password(user, password)
+
         if run_test:
             self.test_rds()
 
@@ -403,5 +419,7 @@ if __name__ == '__main__':
     args = r.args
     if args.test:
         r.test_rds()
+    elif args.info:
+        r.print_info()
     else:
         r.run()
