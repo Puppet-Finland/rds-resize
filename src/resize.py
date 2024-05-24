@@ -306,8 +306,9 @@ class ResizeRDS:
             # 'EnablePerformanceInsights': master_db_stats['EnablePerformanceInsights'],
             # 'DBParameterGroupName': master_db_stats['DBParameterGroupName'],
             'MonitoringRoleArn': master_db_stats['MonitoringRoleArn'],
+            'MonitoringInterval': master_db_stats['MonitoringInterval'],
             'StorageType': master_db_stats['StorageType'],
-            # 'Iops': master_db_stats['Iops'],
+            'Iops': 12000,
         }
         if self.args.dry_run:
             logging.info(f'new db params: \n{new_db_stats}')
@@ -331,7 +332,7 @@ class ResizeRDS:
         if not self.master_rds_address:
             self.master_rds_address = self._get_rds_address(self._get_rds_stats(self.master_rds_identifier))
         if not self.new_rds_address:
-            self.new_rds_address = self._get_rds_address(self._get_rds_stats(self.new_rds_identifier)) | "NOT FOUND"
+            self.new_rds_address = self._get_rds_address(self._get_rds_stats(self.new_rds_identifier))
 
         logging.info(f"MASTER: {self.master_rds_address}")
         logging.info(f"NEWRDS: {self.new_rds_address}")
