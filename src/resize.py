@@ -50,7 +50,8 @@ class ResizeRDS:
         self.master_db_identifier  = c['master_rds_identifier']
         self.reuse_new_rds         = c['reuse_new_rds']
         self.accounts              = c['accounts']
-
+        self.DBParameterGroupName  = c['DBParameterGroupName']
+        self.enable_performance_insights = c['EnablePerformanceInsights']
 
         self.rds = boto3.client('rds')
         self.master_rds_address = self._get_rds_address(self._get_rds_stats(self.master_db_identifier))
@@ -72,6 +73,7 @@ class ResizeRDS:
         parser.add_argument('-v', '--verbose', action='store_true')
         parser.add_argument('-l', '--loglevel', choices=['debug', 'info', 'warning', 'error'],
                             default='info', help='Set the log level')
+        parser.add_argument('-d', '--dry-run', action='store_true', help='Dont actually create anything')
 
         return parser.parse_args()
 
@@ -109,7 +111,8 @@ class ResizeRDS:
                 WHERE datname = '{db_name}' AND client_addr IS NOT NULL;
             """)
             connections = set(cur.fetchall()[0])
-            logging.critical(f"{db_name} has active connections: {list(connections)}")
+            if not args.test:
+                logging.critical(f"{db_name} has active connections: {list(connections)}")
             return result[0]
         return None
 
@@ -274,6 +277,8 @@ class ResizeRDS:
 
     def create_rds(self) -> str:
         master_db_stats = self._get_rds_stats(self.master_rds_identifier)
+        if self.args.dry_run: logging.info(
+                f"Master RDS Stats: \n{master_db_stats}")
 
         logging.info(f"Master RDS address: {self.master_rds_address}")
         vpc_security_group_ids = []
@@ -300,16 +305,30 @@ class ResizeRDS:
             'CopyTagsToSnapshot': master_db_stats['CopyTagsToSnapshot'],
             'DeletionProtection': master_db_stats['DeletionProtection'],
             'EnableCloudwatchLogsExports': master_db_stats['EnabledCloudwatchLogsExports'],
-            'EnablePerformanceInsights': master_db_stats['EnablePerformanceInsights'],
-            'DBParameterGroupName': master_db_stats['DBParameterGroupName'],
+            'DBParameterGroupName': self.DBParameterGroupName,
+            'CACertificateIdentifier': master_db_stats['CACertificateIdentifier'],
+            'EnablePerformanceInsights': self.enable_performance_insights,
             'MonitoringRoleArn': master_db_stats['MonitoringRoleArn'],
+            'MonitoringInterval': master_db_stats['MonitoringInterval'],
+            'StorageType': master_db_stats['StorageType'],
+            if self.allocated_storage > 400:
+                'Iops': master_db_stats['Iops'],
         }
-        logging.info('Creating db instance. This will take a while...')
-        logging.debug(f'new db params: {new_db_stats}')
-        self.rds.create_db_instance(**new_db_stats)
-        waiter = self.rds.get_waiter('db_instance_available')
-        waiter.wait(DBInstanceIdentifier=self.new_rds_identifier)
-        logging.info('Finished creating db instance')
+        if self.args.dry_run:
+            logging.info(f'new db params: \n{new_db_stats}')
+            logging.info(f'old db params: \n{master_db_stats}')
+        else:
+            logging.debug(f'new db params: \n{new_db_stats}')
+        if not args.dry_run:
+            logging.info('Creating db instance. This will take a while...')
+            self.rds.create_db_instance(**new_db_stats)
+            waiter = self.rds.get_waiter('db_instance_available')
+            waiter.wait(DBInstanceIdentifier=self.new_rds_identifier)
+            logging.info('Finished creating db instance')
+        else:
+            logging.info('Finished dry-run')
+            return "dry-run"
+
         return self._get_rds_address(self._get_rds_stats(self.new_rds_identifier))
 
 
@@ -318,7 +337,7 @@ class ResizeRDS:
         if not self.master_rds_address:
             self.master_rds_address = self._get_rds_address(self._get_rds_stats(self.master_rds_identifier))
         if not self.new_rds_address:
-            self.new_rds_address = self._get_rds_address(self._get_rds_stats(self.new_rds_identifier)) | "NOT FOUND"
+            self.new_rds_address = self._get_rds_address(self._get_rds_stats(self.new_rds_identifier))
 
         logging.info(f"MASTER: {self.master_rds_address}")
         logging.info(f"NEWRDS: {self.new_rds_address}")
@@ -375,8 +394,9 @@ class ResizeRDS:
     def run(self, run_test: bool = True):
         db_names = self.databases
 
-        if self._check_dbs_in_use(db_names):
-            sys.exit(1)
+        if not self.args.dry_run:
+            if self._check_dbs_in_use(db_names):
+                sys.exit(1)
 
         if os.path.exists('./dump'):
             rmtree('./dump', ignore_errors=True)
@@ -393,25 +413,33 @@ class ResizeRDS:
                 logging.critical(f"rds instance {self.new_rds_identifier} exists!")
                 sys.exit(1)
 
+        if not self.args.dry_run:
+            self._dump_globals()
+            self._restore_globals()
 
-        self._dump_globals()
-        self._restore_globals()
 
+            for item in db_names:
+                self._dump_db(item)
 
-        for item in db_names:
-            self._dump_db(item)
+            for item in db_names:
+                self._restore_db(item)
 
-        for item in db_names:
-            self._restore_db(item)
+            for user in self.accounts:
+                password = self.accounts[user]
+                self._restore_password(user, password)
 
-        for user in self.accounts:
-            password = self.accounts[user]
-            self._restore_password(user, password)
-
-        if run_test:
-            self.test_rds()
+            if run_test:
+                self.test_rds()
 
         logging.info('Finished')
+
+def continue_prompt():
+    while True:
+        response = input("Continue? (y): ").strip().lower()
+        if response == 'y':
+            break
+        else:
+            print("Invalid option.")
 
 
 if __name__ == '__main__':
