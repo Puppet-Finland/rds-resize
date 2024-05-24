@@ -50,7 +50,8 @@ class ResizeRDS:
         self.master_db_identifier  = c['master_rds_identifier']
         self.reuse_new_rds         = c['reuse_new_rds']
         self.accounts              = c['accounts']
-
+        self.DBParameterGroupName  = c['DBParameterGroupName']
+        self.enable_performance_insights = c['EnablePerformanceInsights']
 
         self.rds = boto3.client('rds')
         self.master_rds_address = self._get_rds_address(self._get_rds_stats(self.master_db_identifier))
@@ -110,7 +111,8 @@ class ResizeRDS:
                 WHERE datname = '{db_name}' AND client_addr IS NOT NULL;
             """)
             connections = set(cur.fetchall()[0])
-            logging.critical(f"{db_name} has active connections: {list(connections)}")
+            if not args.test:
+                logging.critical(f"{db_name} has active connections: {list(connections)}")
             return result[0]
         return None
 
@@ -303,16 +305,18 @@ class ResizeRDS:
             'CopyTagsToSnapshot': master_db_stats['CopyTagsToSnapshot'],
             'DeletionProtection': master_db_stats['DeletionProtection'],
             'EnableCloudwatchLogsExports': master_db_stats['EnabledCloudwatchLogsExports'],
-            # 'DBParameterGroupName': master_db_stats['DBParameterGroupName'],
+            'DBParameterGroupName': self.DBParameterGroupName,
             'CACertificateIdentifier': master_db_stats['CACertificateIdentifier'],
-            'EnablePerformanceInsights': master_db_stats['EnablePerformanceInsights'],
+            'EnablePerformanceInsights': self.enable_performance_insights,
             'MonitoringRoleArn': master_db_stats['MonitoringRoleArn'],
             'MonitoringInterval': master_db_stats['MonitoringInterval'],
             'StorageType': master_db_stats['StorageType'],
-            'Iops': 12000,
+            if self.allocated_storage > 400:
+                'Iops': master_db_stats['Iops'],
         }
         if self.args.dry_run:
             logging.info(f'new db params: \n{new_db_stats}')
+            logging.info(f'old db params: \n{master_db_stats}')
         else:
             logging.debug(f'new db params: \n{new_db_stats}')
         if not args.dry_run:
@@ -428,6 +432,14 @@ class ResizeRDS:
                 self.test_rds()
 
         logging.info('Finished')
+
+def continue_prompt():
+    while True:
+        response = input("Continue? (y): ").strip().lower()
+        if response == 'y':
+            break
+        else:
+            print("Invalid option.")
 
 
 if __name__ == '__main__':
